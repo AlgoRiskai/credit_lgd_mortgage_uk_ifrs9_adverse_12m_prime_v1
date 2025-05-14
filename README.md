@@ -1,0 +1,1 @@
+# credit_lgd_mortgage_uk_ifrs9_adverse_12m_prime_v1
