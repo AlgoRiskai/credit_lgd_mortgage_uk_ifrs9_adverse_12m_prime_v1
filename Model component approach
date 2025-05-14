@@ -1,0 +1,29 @@
+
+Our design decomposes the problem into three separate parts:
+
+Repossession Probability Model: A classifier that estimates the probability that a loan will be repossessed.
+
+Loss Given Repossession Model: A regression model trained on the subset of observations that resulted in repossession.
+
+Loss Given Cure Model: A regression model trained on the “cure” cases—loans that did not get repossessed.
+
+In our integrated model, we compute the overall LGD as:
+
+LGD = (Probability_of_Repossession × Predicted_Loss_if_Repossessed) + ((1 – Probability_of_Repossession) × Predicted_Loss_if_Cured)
+
+
+Data Generation: The generate_historical_data() function creates a simulated dataset representing five years of historical repossession data. For each record, it randomly assigns a year, exposure value, a simulated credit score, and a collateral type. It then determines whether repossession occurred (repo_flag) and assigns a loss value appropriately. The actual LGD is computed based on the observed outcome.
+
+Repossession Probability Model: The RepossessionProbabilityModel class uses a pipeline that preprocesses numeric and categorical features and fits a random forest classifier. Its predict_proba method returns the estimated probability that a given loan is repossessed.
+
+Loss Given Outcome Models: The LossGivenModel class encapsulates a regression pipeline (using a random forest regressor) that predicts the loss value. Two instances of this class are created and trained separately on:
+
+Loans that were repossessed (for predicting the loss given repossession)
+
+Loans that cured (for predicting the loss given cure)
+
+Combined LGD Model: The CombinedLGDModel class aggregates the three components. For any loan, it computes the integrated LGD estimate as:   LGD = (p_repo × predicted_loss_repo) + ((1 – p_repo) × predicted_loss_cure).
+
+Integration and Evaluation: In the main() function, the data is split into training and testing sets. Each component is trained on the respective subset of the data, and the overall LGD model is evaluated using mean squared error (MSE). Each fitted component is also saved to disk using joblib for future use.
+
+This component-based approach makes it easy to update or exchange parts of the model. For example, you could swap out the random forest classifier/regressor for another algorithm, add hyperparameter tuning, or incorporate additional features as you gather more historical data.
