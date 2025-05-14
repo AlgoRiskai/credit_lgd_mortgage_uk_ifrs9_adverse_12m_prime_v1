@@ -1,0 +1,241 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.metrics import mean_squared_error, accuracy_score
+import joblib
+
+# -------------------------------------------------------------------
+# 1. Data Loading Component
+# -------------------------------------------------------------------
+def generate_historical_data(n_samples=1000, random_state=42):
+    """
+    Simulate 5 years of historical repossession data.
+    
+    Columns generated:
+      - Year: Randomly between 2015 and 2019.
+      - Exposure: Loan amount (e.g., in dollars).
+      - BorrowerCreditScore: Simulated credit score between 600 and 800.
+      - CollateralType: A categorical variable that might influence outcomes.
+      - repo_flag: 1 if repossession occurred, 0 if not (cure case). (Assume ~30% repossession rate)
+      - LGD_repo: Loss given repossession for repossessed cases; simulated between 0.3 and 0.9.
+      - LGD_cure: Loss given cure for non-repossessed cases; simulated between 0.0 and 0.3.
+      - Actual_LGD: Combination of the above, computed as:
+           Actual_LGD = LGD_repo if repo_flag==1 else LGD_cure.
+    """
+    np.random.seed(random_state)
+    df = pd.DataFrame()
+    df['Year'] = np.random.randint(2015, 2020, size=n_samples)
+    df['Exposure'] = np.random.uniform(100000, 500000, n_samples)
+    df['BorrowerCreditScore'] = np.random.randint(600, 800, n_samples)
+    df['CollateralType'] = np.random.choice(['TypeA', 'TypeB', 'TypeC'], n_samples)
+    
+    # Simulate repossession decisions (binary outcome)
+    df['repo_flag'] = np.random.binomial(1, 0.3, n_samples)
+    
+    # For repossession cases, generate a loss between 0.3 and 0.9;
+    # For cure cases, generate a loss between 0.0 and 0.3.
+    df['LGD_repo'] = np.where(df['repo_flag'] == 1,
+                              np.random.uniform(0.3, 0.9, n_samples),
+                              np.nan)
+    df['LGD_cure'] = np.where(df['repo_flag'] == 0,
+                              np.random.uniform(0.0, 0.3, n_samples),
+                              np.nan)
+    # Actual LGD is defined by outcome:
+    df['Actual_LGD'] = np.where(df['repo_flag'] == 1, df['LGD_repo'], df['LGD_cure'])
+    return df
+
+# -------------------------------------------------------------------
+# 2. Repossession Probability Component
+# -------------------------------------------------------------------
+class RepossessionProbabilityModel:
+    """
+    A component that estimates the probability of repossession.
+    """
+    def __init__(self, numeric_features, categorical_features, random_state=42):
+        self.numeric_features = numeric_features
+        self.categorical_features = categorical_features
+        self.random_state = random_state
+        self.pipeline = self._create_pipeline()
+    
+    def _create_pipeline(self):
+        # Pipeline for numeric features
+        num_pipeline = Pipeline(steps=[
+            ('scaler', StandardScaler())
+        ])
+        # Pipeline for categorical features
+        cat_pipeline = Pipeline(steps=[
+            ('onehot', OneHotEncoder(handle_unknown='ignore'))
+        ])
+        preprocessor = ColumnTransformer(transformers=[
+            ('num', num_pipeline, self.numeric_features),
+            ('cat', cat_pipeline, self.categorical_features)
+        ])
+        # We use a RandomForestClassifier as our probability estimator.
+        pipeline = Pipeline(steps=[
+            ('preprocessor', preprocessor),
+            ('classifier', RandomForestClassifier(random_state=self.random_state))
+        ])
+        return pipeline
+    
+    def fit(self, X, y):
+        self.pipeline.fit(X, y)
+    
+    def predict_proba(self, X):
+        # Return the probability for the positive class (repossession)
+        return self.pipeline.predict_proba(X)[:, 1]
+    
+    def score(self, X, y):
+        # For evaluation, return accuracy
+        return self.pipeline.score(X, y)
+
+# -------------------------------------------------------------------
+# 3. Loss Given Outcome Models Component
+#    (Used for both repossession and cure subsets)
+# -------------------------------------------------------------------
+class LossGivenModel:
+    """
+    A regression component to predict loss given outcome.
+    This can be used for both repossession and cure cases.
+    """
+    def __init__(self, numeric_features, categorical_features, random_state=42):
+        self.numeric_features = numeric_features
+        self.categorical_features = categorical_features
+        self.random_state = random_state
+        self.pipeline = self._create_pipeline()
+    
+    def _create_pipeline(self):
+        num_pipeline = Pipeline(steps=[
+            ('scaler', StandardScaler())
+        ])
+        cat_pipeline = Pipeline(steps=[
+            ('onehot', OneHotEncoder(handle_unknown='ignore'))
+        ])
+        preprocessor = ColumnTransformer(transformers=[
+            ('num', num_pipeline, self.numeric_features),
+            ('cat', cat_pipeline, self.categorical_features)
+        ])
+        pipeline = Pipeline(steps=[
+            ('preprocessor', preprocessor),
+            ('regressor', RandomForestRegressor(random_state=self.random_state))
+        ])
+        return pipeline
+    
+    def fit(self, X, y):
+        self.pipeline.fit(X, y)
+    
+    def predict(self, X):
+        return self.pipeline.predict(X)
+
+# -------------------------------------------------------------------
+# 4. Combined LGD Model Component
+# -------------------------------------------------------------------
+class CombinedLGDModel:
+    """
+    This final component aggregates the outputs of:
+      - RepossessionProbabilityModel
+      - LossGivenRepossessionModel (for repossessed cases)
+      - LossGivenCureModel (for cured cases)
+
+    For an input X, it computes:
+      LGD = (p_repo * predicted_loss_repossessed) + ((1 - p_repo) * predicted_loss_cured)
+    """
+    def __init__(self, prob_model, loss_repo_model, loss_cure_model):
+        self.prob_model = prob_model
+        self.loss_repo_model = loss_repo_model
+        self.loss_cure_model = loss_cure_model
+    
+    def predict(self, X):
+        p_repo = self.prob_model.predict_proba(X)
+        loss_repo_pred = self.loss_repo_model.predict(X)
+        loss_cure_pred = self.loss_cure_model.predict(X)
+        combined_lgd = p_repo * loss_repo_pred + (1 - p_repo) * loss_cure_pred
+        return combined_lgd
+
+# -------------------------------------------------------------------
+# 5. Main Integration: Training and Evaluating All Components
+# -------------------------------------------------------------------
+def main():
+    # (a) Generate historical data (simulate 5 years)
+    df = generate_historical_data(n_samples=1000)
+    print("Historical Data Sample:")
+    print(df.head())
+    
+    # Define common feature set for modeling.
+    features = ['Exposure', 'BorrowerCreditScore', 'CollateralType']
+    
+    # Split the dataset into training and test sets.
+    train_idx, test_idx = train_test_split(df.index, test_size=0.2, random_state=42)
+    train_data = df.loc[train_idx]
+    test_data = df.loc[test_idx]
+    
+    # -----------------------------
+    # Train the repossession probability model (all records)
+    # -----------------------------
+    X_train_prob = train_data[features]
+    y_train_prob = train_data['repo_flag']
+    prob_model = RepossessionProbabilityModel(
+        numeric_features=['Exposure', 'BorrowerCreditScore'],
+        categorical_features=['CollateralType'],
+        random_state=42
+    )
+    prob_model.fit(X_train_prob, y_train_prob)
+    prob_accuracy = prob_model.score(X_train_prob, y_train_prob)
+    print(f"\nRepossession Model Training Accuracy: {prob_accuracy:.3f}")
+    
+    # -----------------------------
+    # Train the Loss Given Repossession model (only records with repo_flag==1)
+    # -----------------------------
+    train_repo = train_data[train_data['repo_flag'] == 1]
+    if len(train_repo) == 0:
+        print("No repossession cases in training data!")
+        return
+    X_train_repo = train_repo[features]
+    y_train_repo = train_repo['LGD_repo']
+    loss_repo_model = LossGivenModel(
+        numeric_features=['Exposure', 'BorrowerCreditScore'],
+        categorical_features=['CollateralType'],
+        random_state=42
+    )
+    loss_repo_model.fit(X_train_repo, y_train_repo)
+    
+    # -----------------------------
+    # Train the Loss Given Cure model (only records with repo_flag==0)
+    # -----------------------------
+    train_cure = train_data[train_data['repo_flag'] == 0]
+    if len(train_cure) == 0:
+        print("No cure cases in training data!")
+        return
+    X_train_cure = train_cure[features]
+    y_train_cure = train_cure['LGD_cure']
+    loss_cure_model = LossGivenModel(
+        numeric_features=['Exposure', 'BorrowerCreditScore'],
+        categorical_features=['CollateralType'],
+        random_state=42
+    )
+    loss_cure_model.fit(X_train_cure, y_train_cure)
+    
+    # -----------------------------
+    # Create and Evaluate the Combined LGD Model
+    # -----------------------------
+    combined_lgd_model = CombinedLGDModel(prob_model, loss_repo_model, loss_cure_model)
+    
+    X_test = test_data[features]
+    actual_lgd = test_data['Actual_LGD']
+    predicted_lgd = combined_lgd_model.predict(X_test)
+    
+    mse_value = mean_squared_error(actual_lgd, predicted_lgd)
+    print("\nCombined LGD Model Evaluation:")
+    print("Mean Squared Error (MSE):", mse_value)
+    
+    # Optionally, save each component for later use.
+    joblib.dump(prob_model.pipeline, "repossession_probability_model.pkl")
+    joblib.dump(loss_repo_model.pipeline, "loss_given_repossession_model.pkl")
+    joblib.dump(loss_cure_model.pipeline, "loss_given_cure_model.pkl")
+    print("\nAll models have been saved to disk.")
+
+if __name__ == '__main__':
+    main()
